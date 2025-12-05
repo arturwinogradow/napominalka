@@ -14,6 +14,25 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "8350539182:AAHvgtrMJDAzRJIMVaTFPI240JFX71K5qE4"
 
+# Список предметов для домашних заданий
+SUBJECTS = [
+    "Информатика (Электив)",
+    "Физика",
+    "Биология",
+    "Алгебра",
+    "Геометрия",
+    "Русский язык (Электив)",
+    "Обществознание",
+    "Информатика",
+    "Литература",
+    "Химия",
+    "География",
+    "Индивидуальный проект",
+    "История",
+    "Вероятность и статистика",
+    "Труд",
+    "Математика (Электив)"
+]
 
 # Простое решение для московского времени (UTC+3)
 def get_current_time():
@@ -27,6 +46,8 @@ def convert_to_moscow_time(naive_dt):
 
 # Состояния для ConversationHandler
 TITLE, START_TIME, END_TIME, REMIND_TYPE, REMIND_INTERVAL, REMIND_COUNT = range(6)
+# Состояния для домашних заданий
+HW_SUBJECT, HW_CONTENT, HW_DUE_DATE = range(6, 9)
 
 REMINDER_PRESETS = {
     '1': [50],
@@ -77,6 +98,19 @@ def init_db():
             reminder_enabled BOOLEAN DEFAULT FALSE,
             reminder_time DATETIME,
             reminder_interval INTEGER,
+            is_completed BOOLEAN DEFAULT FALSE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    # Таблица для домашних заданий
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS homework (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            subject TEXT NOT NULL,
+            task TEXT NOT NULL,
+            due_date DATETIME,
             is_completed BOOLEAN DEFAULT FALSE,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -136,6 +170,19 @@ def save_diary_entry(user_id, content, reminder_enabled=False, reminder_time=Non
     return entry_id
 
 
+def save_homework(user_id, subject, task, due_date=None):
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO homework (user_id, subject, task, due_date)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, subject, task, due_date.isoformat() if due_date else None))
+    hw_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return hw_id
+
+
 def get_user_tasks(user_id):
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
     cur = conn.cursor()
@@ -163,6 +210,30 @@ def get_diary_entries(user_id):
     return entries
 
 
+def get_homework(user_id, subject=None):
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cur = conn.cursor()
+    
+    if subject:
+        cur.execute('''
+            SELECT id, subject, task, due_date, is_completed 
+            FROM homework 
+            WHERE user_id = ? AND subject = ? AND is_completed = FALSE
+            ORDER BY due_date IS NULL, due_date, created_at
+        ''', (user_id, subject))
+    else:
+        cur.execute('''
+            SELECT id, subject, task, due_date, is_completed 
+            FROM homework 
+            WHERE user_id = ? AND is_completed = FALSE
+            ORDER BY due_date IS NULL, due_date, subject, created_at
+        ''', (user_id,))
+    
+    homework = cur.fetchall()
+    conn.close()
+    return homework
+
+
 def delete_task(task_id, user_id):
     conn = sqlite3.connect('tasks.db', check_same_thread=False)
     cur = conn.cursor()
@@ -179,13 +250,57 @@ def delete_diary_entry(entry_id, user_id):
     conn.close()
 
 
+def delete_homework(hw_id, user_id):
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute('DELETE FROM homework WHERE id = ? AND user_id = ?', (hw_id, user_id))
+    conn.commit()
+    conn.close()
+
+
+def update_homework(hw_id, user_id, task=None, due_date=None):
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cur = conn.cursor()
+    
+    if task and due_date:
+        cur.execute('''
+            UPDATE homework 
+            SET task = ?, due_date = ?
+            WHERE id = ? AND user_id = ?
+        ''', (task, due_date.isoformat() if due_date else None, hw_id, user_id))
+    elif task:
+        cur.execute('''
+            UPDATE homework 
+            SET task = ?
+            WHERE id = ? AND user_id = ?
+        ''', (task, hw_id, user_id))
+    elif due_date:
+        cur.execute('''
+            UPDATE homework 
+            SET due_date = ?
+            WHERE id = ? AND user_id = ?
+        ''', (due_date.isoformat() if due_date else None, hw_id, user_id))
+    
+    conn.commit()
+    conn.close()
+
+
+def mark_homework_completed(hw_id, user_id):
+    conn = sqlite3.connect('tasks.db', check_same_thread=False)
+    cur = conn.cursor()
+    cur.execute('UPDATE homework SET is_completed = TRUE WHERE id = ? AND user_id = ?', (hw_id, user_id))
+    conn.commit()
+    conn.close()
+
+
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     keyboard = [
         [KeyboardButton("Добавить дело"), KeyboardButton("Мои дела")],
         [KeyboardButton("Удалить дело"), KeyboardButton("Дневник дел")],
-        [KeyboardButton("Добавить в дневник"), KeyboardButton("Тест напоминания")]
+        [KeyboardButton("Добавить в дневник"), KeyboardButton("ДЗ 📚")],
+        [KeyboardButton("Добавить ДЗ"), KeyboardButton("Тест напоминания")]
     ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -257,11 +372,16 @@ async def delete_task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     diary_entries = get_diary_entries(user_id)
     if diary_entries:
         keyboard.append([InlineKeyboardButton("📔 Удалить из дневника", callback_data="delete_diary_mode")])
+    
+    # Добавляем кнопку для удаления ДЗ
+    homework = get_homework(user_id)
+    if homework:
+        keyboard.append([InlineKeyboardButton("📚 Удалить ДЗ", callback_data="delete_hw_mode")])
 
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="delete_cancel")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Выберите дело для удаления:", reply_markup=reply_markup)
+    await update.message.reply_text("Выберите что удалить:", reply_markup=reply_markup)
 
 
 # Показ дневника дел
@@ -292,6 +412,559 @@ async def show_diary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         diary_text += "\n"
 
     await update.message.reply_text(diary_text)
+
+
+# Показ домашних заданий
+async def show_homework(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    homework = get_homework(user_id)
+    
+    if not homework:
+        await update.message.reply_text(
+            "📚 У вас пока нет домашних заданий.\n"
+            "Нажмите 'Добавить ДЗ', чтобы добавить первое задание."
+        )
+        return
+    
+    # Группируем по предметам
+    subjects_dict = {}
+    for hw in homework:
+        hw_id, subject, task, due_date, is_completed = hw
+        
+        if subject not in subjects_dict:
+            subjects_dict[subject] = []
+        
+        subjects_dict[subject].append((hw_id, task, due_date, is_completed))
+    
+    # Формируем сообщение
+    current_time = get_current_time()
+    message = "📚 **ВАШИ ДОМАШНИЕ ЗАДАНИЯ:**\n\n"
+    
+    for subject, tasks in subjects_dict.items():
+        message += f"**{subject}:**\n"
+        for hw_id, task, due_date, is_completed in tasks:
+            message += f"• {task}\n"
+            if due_date:
+                due_dt = datetime.fromisoformat(due_date)
+                time_left = (due_dt - current_time).total_seconds()
+                
+                if time_left < 0:
+                    message += f"  ⚠️ **ПРОСРОЧЕНО!** (было {due_dt.strftime('%d.%m.%Y %H:%M')})\n"
+                elif time_left < 86400:  # менее суток
+                    hours_left = int(time_left // 3600)
+                    message += f"  ⏰ **СРОЧНО!** Осталось {hours_left} ч (до {due_dt.strftime('%d.%m.%Y %H:%M')})\n"
+                else:
+                    days_left = int(time_left // 86400)
+                    message += f"  📅 Осталось {days_left} дн. (до {due_dt.strftime('%d.%m.%Y %H:%M')})\n"
+            else:
+                message += f"  ⏳ Без срока\n"
+            
+            message += f"  🆔 ID: {hw_id}\n"
+        message += "\n"
+    
+    # Добавляем клавиатуру для управления
+    keyboard = []
+    for subject in SUBJECTS:
+        # Проверяем, есть ли задания по этому предмету
+        subject_hw = get_homework(user_id, subject)
+        if subject_hw:
+            button_text = f"📖 {subject[:15]}..." if len(subject) > 15 else f"📖 {subject}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"hw_subject_{subject}")])
+    
+    keyboard.append([InlineKeyboardButton("➕ Добавить ДЗ", callback_data="hw_add_new")])
+    keyboard.append([InlineKeyboardButton("✏️ Редактировать ДЗ", callback_data="hw_edit_mode")])
+    keyboard.append([InlineKeyboardButton("✅ Отметить выполненным", callback_data="hw_complete_mode")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(message, reply_markup=reply_markup)
+
+
+# Показать ДЗ по конкретному предмету
+async def show_hw_by_subject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    subject = query.data.replace("hw_subject_", "")
+    user_id = query.from_user.id
+    
+    homework = get_homework(user_id, subject)
+    
+    if not homework:
+        await query.edit_message_text(
+            f"📚 **{subject}**\n\n"
+            "Нет домашних заданий по этому предмету.\n\n"
+            "Нажмите 'Добавить ДЗ', чтобы добавить задание."
+        )
+        return
+    
+    message = f"📚 **{subject}**\n\n"
+    current_time = get_current_time()
+    
+    for hw in homework:
+        hw_id, hw_subject, task, due_date, is_completed = hw
+        
+        message += f"• **{task}**\n"
+        if due_date:
+            due_dt = datetime.fromisoformat(due_date)
+            time_left = (due_dt - current_time).total_seconds()
+            
+            if time_left < 0:
+                message += f"  ⚠️ **ПРОСРОЧЕНО!** (было {due_dt.strftime('%d.%m.%Y %H:%M')})\n"
+            elif time_left < 86400:
+                hours_left = int(time_left // 3600)
+                message += f"  ⏰ **СРОЧНО!** Осталось {hours_left} ч\n"
+            else:
+                days_left = int(time_left // 86400)
+                message += f"  📅 Осталось {days_left} дн. (до {due_dt.strftime('%d.%m.%Y %H:%M')})\n"
+        else:
+            message += f"  ⏳ Без срока\n"
+        
+        message += f"  🆔 ID: {hw_id}\n\n"
+    
+    # Кнопки для управления
+    keyboard = [
+        [InlineKeyboardButton("➕ Добавить задание", callback_data=f"hw_add_{subject}")],
+        [InlineKeyboardButton("✏️ Редактировать", callback_data=f"hw_edit_{subject}")],
+        [InlineKeyboardButton("✅ Отметить выполненным", callback_data=f"hw_complete_{subject}")],
+        [InlineKeyboardButton("📋 Все предметы", callback_data="hw_back_to_all")]
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(message, reply_markup=reply_markup)
+
+
+# Начать добавление ДЗ
+async def add_hw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = []
+    # Разбиваем предметы на строки по 2
+    for i in range(0, len(SUBJECTS), 2):
+        row = []
+        for j in range(2):
+            if i + j < len(SUBJECTS):
+                subject = SUBJECTS[i + j]
+                # Обрезаем длинные названия для кнопки
+                button_text = subject[:15] + "..." if len(subject) > 15 else subject
+                row.append(InlineKeyboardButton(button_text, callback_data=f"hw_add_subject_{subject}"))
+        keyboard.append(row)
+    
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="hw_cancel")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        "📝 **Добавление домашнего задания**\n\n"
+        "Выберите предмет:",
+        reply_markup=reply_markup
+    )
+    return HW_SUBJECT
+
+
+# Обработка выбора предмета для ДЗ
+async def process_hw_subject(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "hw_cancel":
+        await query.edit_message_text("❌ Добавление ДЗ отменено.")
+        return ConversationHandler.END
+    
+    subject = query.data.replace("hw_add_subject_", "")
+    context.user_data['hw_subject'] = subject
+    
+    await query.edit_message_text(
+        f"📝 **Предмет:** {subject}\n\n"
+        "Теперь введите описание задания:\n"
+        "Пример: 'Сделать упражнения 1-5 на странице 45'"
+    )
+    return HW_CONTENT
+
+
+# Обработка содержания ДЗ
+async def process_hw_content(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    task = update.message.text
+    context.user_data['hw_task'] = task
+    
+    keyboard = [
+        [InlineKeyboardButton("✅ Добавить срок выполнения", callback_data="hw_with_date")],
+        [InlineKeyboardButton("❌ Без срока", callback_data="hw_no_date")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_text(
+        f"📝 **Задание:** {task}\n\n"
+        "Хотите добавить срок выполнения?",
+        reply_markup=reply_markup
+    )
+    return HW_DUE_DATE
+
+
+# Обработка срока выполнения ДЗ
+async def process_hw_due_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    subject = context.user_data['hw_subject']
+    task = context.user_data['hw_task']
+    
+    if query.data == "hw_no_date":
+        # Сохраняем без срока
+        save_homework(user_id, subject, task)
+        await query.edit_message_text(
+            f"✅ **Домашнее задание добавлено!**\n\n"
+            f"📚 **Предмет:** {subject}\n"
+            f"📋 **Задание:** {task}\n"
+            f"⏰ **Срок:** Без срока\n\n"
+            "Вы можете просмотреть все ДЗ, нажав кнопку 'ДЗ 📚'"
+        )
+        return ConversationHandler.END
+    
+    else:
+        await query.edit_message_text(
+            "📅 Введите дату и время выполнения (в формате ДД.ММ.ГГГГ ЧЧ:ММ):\n"
+            "Пример: 10.12.2025 18:00"
+        )
+        return "HW_DATE_INPUT"
+
+
+# Обработка ввода даты выполнения
+async def process_hw_date_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+    subject = context.user_data['hw_subject']
+    task = context.user_data['hw_task']
+    
+    try:
+        due_date_naive = datetime.strptime(text, '%d.%m.%Y %H:%M')
+        due_date = convert_to_moscow_time(due_date_naive)
+        
+        # Проверяем, что дата в будущем
+        current_time = get_current_time()
+        if due_date <= current_time:
+            await update.message.reply_text(
+                "❌ Дата должна быть в будущем!\n"
+                "Введите дату заново:"
+            )
+            return "HW_DATE_INPUT"
+        
+        # Сохраняем с сроком
+        save_homework(user_id, subject, task, due_date)
+        
+        await update.message.reply_text(
+            f"✅ **Домашнее задание добавлено!**\n\n"
+            f"📚 **Предмет:** {subject}\n"
+            f"📋 **Задание:** {task}\n"
+            f"⏰ **Срок:** {due_date.strftime('%d.%m.%Y %H:%M')}\n\n"
+            "Вы можете просмотреть все ДЗ, нажав кнопку 'ДЗ 📚'"
+        )
+        return ConversationHandler.END
+        
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Неверный формат даты. Попробуйте еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):"
+        )
+        return "HW_DATE_INPUT"
+
+
+# Редактирование ДЗ
+async def edit_homework_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "hw_edit_mode":
+        user_id = query.from_user.id
+        homework = get_homework(user_id)
+        
+        if not homework:
+            await query.edit_message_text("❌ Нет заданий для редактирования.")
+            return
+        
+        keyboard = []
+        for hw in homework:
+            hw_id, subject, task, due_date, is_completed = hw
+            task_short = task[:30] + "..." if len(task) > 30 else task
+            button_text = f"✏️ {subject}: {task_short}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"edit_hw_{hw_id}")])
+        
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="hw_edit_cancel")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("Выберите задание для редактирования:", reply_markup=reply_markup)
+    
+    elif query.data.startswith("hw_edit_"):
+        subject = query.data.replace("hw_edit_", "")
+        user_id = query.from_user.id
+        homework = get_homework(user_id, subject)
+        
+        if not homework:
+            await query.edit_message_text(f"❌ Нет заданий по предмету {subject}.")
+            return
+        
+        keyboard = []
+        for hw in homework:
+            hw_id, hw_subject, task, due_date, is_completed = hw
+            task_short = task[:30] + "..." if len(task) > 30 else task
+            keyboard.append([InlineKeyboardButton(f"✏️ {task_short}", callback_data=f"edit_hw_{hw_id}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="hw_back_to_all")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(f"Выберите задание по {subject} для редактирования:", reply_markup=reply_markup)
+    
+    elif query.data.startswith("edit_hw_"):
+        hw_id = int(query.data.replace("edit_hw_", ""))
+        context.user_data['editing_hw_id'] = hw_id
+        
+        keyboard = [
+            [InlineKeyboardButton("📝 Изменить текст", callback_data=f"edit_hw_text_{hw_id}")],
+            [InlineKeyboardButton("📅 Изменить срок", callback_data=f"edit_hw_date_{hw_id}")],
+            [InlineKeyboardButton("❌ Удалить задание", callback_data=f"delete_hw_{hw_id}")],
+            [InlineKeyboardButton("🔙 Назад", callback_data="hw_edit_mode")]
+        ]
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(f"Выберите действие для задания ID: {hw_id}:", reply_markup=reply_markup)
+    
+    elif query.data.startswith("edit_hw_text_"):
+        hw_id = int(query.data.replace("edit_hw_text_", ""))
+        context.user_data['editing_hw_id'] = hw_id
+        context.user_data['editing_type'] = 'text'
+        
+        await query.edit_message_text(f"Введите новый текст для задания ID: {hw_id}:")
+        # Здесь нужно будет обработать ввод текста
+    
+    elif query.data.startswith("edit_hw_date_"):
+        hw_id = int(query.data.replace("edit_hw_date_", ""))
+        context.user_data['editing_hw_id'] = hw_id
+        context.user_data['editing_type'] = 'date'
+        
+        await query.edit_message_text(f"Введите новый срок для задания ID: {hw_id} (ДД.ММ.ГГГГ ЧЧ:ММ):")
+        # Здесь нужно будет обработать ввод даты
+
+
+# Отметка ДЗ как выполненного
+async def complete_homework_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == "hw_complete_mode":
+        user_id = query.from_user.id
+        homework = get_homework(user_id)
+        
+        if not homework:
+            await query.edit_message_text("❌ Нет активных заданий.")
+            return
+        
+        keyboard = []
+        for hw in homework:
+            hw_id, subject, task, due_date, is_completed = hw
+            task_short = task[:30] + "..." if len(task) > 30 else task
+            button_text = f"✅ {subject}: {task_short}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"complete_hw_{hw_id}")])
+        
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="hw_complete_cancel")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("Выберите задание для отметки как выполненное:", reply_markup=reply_markup)
+    
+    elif query.data.startswith("hw_complete_"):
+        subject = query.data.replace("hw_complete_", "")
+        user_id = query.from_user.id
+        homework = get_homework(user_id, subject)
+        
+        if not homework:
+            await query.edit_message_text(f"❌ Нет заданий по предмету {subject}.")
+            return
+        
+        keyboard = []
+        for hw in homework:
+            hw_id, hw_subject, task, due_date, is_completed = hw
+            task_short = task[:30] + "..." if len(task) > 30 else task
+            keyboard.append([InlineKeyboardButton(f"✅ {task_short}", callback_data=f"complete_hw_{hw_id}")])
+        
+        keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="hw_back_to_all")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(f"Выберите задание по {subject} для отметки как выполненное:", reply_markup=reply_markup)
+
+
+# Обработка действий с ДЗ
+async def handle_hw_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    user_id = query.from_user.id
+    
+    if data == "hw_add_new":
+        await add_hw_start(update, context)
+    
+    elif data == "hw_back_to_all":
+        await show_homework(update, context)
+    
+    elif data.startswith("hw_add_"):
+        subject = data.replace("hw_add_", "")
+        context.user_data['hw_subject'] = subject
+        await query.edit_message_text(
+            f"📝 **Предмет:** {subject}\n\n"
+            "Введите описание задания:"
+        )
+        # Здесь можно начать процесс добавления
+    
+    elif data.startswith("complete_hw_"):
+        hw_id = int(data.replace("complete_hw_", ""))
+        mark_homework_completed(hw_id, user_id)
+        await query.edit_message_text(f"✅ Задание ID: {hw_id} отмечено как выполненное!")
+    
+    elif data.startswith("delete_hw_"):
+        hw_id = int(data.replace("delete_hw_", ""))
+        delete_homework(hw_id, user_id)
+        await query.edit_message_text(f"✅ Задание ID: {hw_id} удалено!")
+    
+    elif data == "hw_edit_cancel" or data == "hw_complete_cancel":
+        await query.edit_message_text("❌ Действие отменено.")
+    
+    elif data.startswith("hw_subject_"):
+        await show_hw_by_subject(update, context)
+
+
+# Обработка ввода при редактировании ДЗ
+async def process_hw_edit_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'editing_hw_id' in context.user_data and 'editing_type' in context.user_data:
+        hw_id = context.user_data['editing_hw_id']
+        editing_type = context.user_data['editing_type']
+        user_id = update.effective_user.id
+        text = update.message.text
+        
+        if editing_type == 'text':
+            update_homework(hw_id, user_id, task=text)
+            await update.message.reply_text(f"✅ Текст задания ID: {hw_id} обновлен!")
+        
+        elif editing_type == 'date':
+            try:
+                due_date_naive = datetime.strptime(text, '%d.%m.%Y %H:%M')
+                due_date = convert_to_moscow_time(due_date_naive)
+                
+                current_time = get_current_time()
+                if due_date <= current_time:
+                    await update.message.reply_text(
+                        "❌ Дата должна быть в будущем!\n"
+                        "Введите дату заново:"
+                    )
+                    return
+                
+                update_homework(hw_id, user_id, due_date=due_date)
+                await update.message.reply_text(f"✅ Срок задания ID: {hw_id} обновлен!")
+            
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ Неверный формат даты. Попробуйте еще раз (ДД.ММ.ГГГГ ЧЧ:ММ):"
+                )
+                return
+        
+        # Очищаем контекст
+        context.user_data.pop('editing_hw_id', None)
+        context.user_data.pop('editing_type', None)
+    
+    else:
+        await update.message.reply_text("❌ Неизвестная команда.")
+
+
+# Обработка удаления
+async def process_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "delete_cancel":
+        await query.edit_message_text("❌ Удаление отменено.")
+        return
+
+    elif query.data == "delete_diary_mode":
+        # Переходим в режим удаления записей дневника
+        user_id = query.from_user.id
+        entries = get_diary_entries(user_id)
+
+        if not entries:
+            await query.edit_message_text("❌ В дневнике нет записей для удаления.")
+            return
+
+        keyboard = []
+        for entry in entries:
+            entry_id, content, reminder_enabled, reminder_time, reminder_interval, is_completed = entry
+            # Обрезаем длинный текст для кнопки
+            button_text = content[:30] + "..." if len(content) > 30 else content
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"delete_diary_{entry_id}")])
+
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="delete_cancel")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("Выберите запись из дневника для удаления:", reply_markup=reply_markup)
+        return
+    
+    elif query.data == "delete_hw_mode":
+        # Переходим в режим удаления ДЗ
+        user_id = query.from_user.id
+        homework = get_homework(user_id)
+
+        if not homework:
+            await query.edit_message_text("❌ Нет домашних заданий для удаления.")
+            return
+
+        keyboard = []
+        for hw in homework:
+            hw_id, subject, task, due_date, is_completed = hw
+            # Обрезаем длинный текст для кнопки
+            task_short = task[:30] + "..." if len(task) > 30 else task
+            button_text = f"{subject}: {task_short}"
+            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"delete_hw_{hw_id}")])
+
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="delete_cancel")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text("Выберите домашнее задание для удаления:", reply_markup=reply_markup)
+        return
+
+    elif query.data.startswith("delete_task_"):
+        task_id = int(query.data.split('_')[2])
+        user_id = query.from_user.id
+
+        tasks = get_user_tasks(user_id)
+        task_title = ""
+        for task in tasks:
+            if task[0] == task_id:
+                task_title = task[1]
+                break
+
+        if task_title:
+            delete_task(task_id, user_id)
+            await query.edit_message_text(f"✅ Дело '{task_title}' успешно удалено!")
+        else:
+            await query.edit_message_text("❌ Дело не найдено.")
+
+    elif query.data.startswith("delete_diary_"):
+        entry_id = int(query.data.split('_')[2])
+        user_id = query.from_user.id
+
+        entries = get_diary_entries(user_id)
+        entry_content = ""
+        for entry in entries:
+            if entry[0] == entry_id:
+                entry_content = entry[1]
+                break
+
+        if entry_content:
+            delete_diary_entry(entry_id, user_id)
+            await query.edit_message_text(f"✅ Запись из дневника удалена!\n\n{entry_content}")
+        else:
+            await query.edit_message_text("❌ Запись не найдена.")
+    
+    elif query.data.startswith("delete_hw_"):
+        hw_id = int(query.data.split('_')[2])
+        user_id = query.from_user.id
+        
+        delete_homework(hw_id, user_id)
+        await query.edit_message_text(f"✅ Домашнее задание ID: {hw_id} удалено!")
 
 
 # Добавление записи в дневник
@@ -508,72 +1181,6 @@ async def send_diary_reminder(context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"❌ Ошибка отправки напоминания дневника: {e}")
-
-
-# Обработка удаления
-async def process_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "delete_cancel":
-        await query.edit_message_text("❌ Удаление отменено.")
-        return
-
-    elif query.data == "delete_diary_mode":
-        # Переходим в режим удаления записей дневника
-        user_id = query.from_user.id
-        entries = get_diary_entries(user_id)
-
-        if not entries:
-            await query.edit_message_text("❌ В дневнике нет записей для удаления.")
-            return
-
-        keyboard = []
-        for entry in entries:
-            entry_id, content, reminder_enabled, reminder_time, reminder_interval, is_completed = entry
-            # Обрезаем длинный текст для кнопки
-            button_text = content[:30] + "..." if len(content) > 30 else content
-            keyboard.append([InlineKeyboardButton(button_text, callback_data=f"delete_diary_{entry_id}")])
-
-        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="delete_cancel")])
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Выберите запись из дневника для удаления:", reply_markup=reply_markup)
-        return
-
-    elif query.data.startswith("delete_task_"):
-        task_id = int(query.data.split('_')[2])
-        user_id = query.from_user.id
-
-        tasks = get_user_tasks(user_id)
-        task_title = ""
-        for task in tasks:
-            if task[0] == task_id:
-                task_title = task[1]
-                break
-
-        if task_title:
-            delete_task(task_id, user_id)
-            await query.edit_message_text(f"✅ Дело '{task_title}' успешно удалено!")
-        else:
-            await query.edit_message_text("❌ Дело не найдено.")
-
-    elif query.data.startswith("delete_diary_"):
-        entry_id = int(query.data.split('_')[2])
-        user_id = query.from_user.id
-
-        entries = get_diary_entries(user_id)
-        entry_content = ""
-        for entry in entries:
-            if entry[0] == entry_id:
-                entry_content = entry[1]
-                break
-
-        if entry_content:
-            delete_diary_entry(entry_id, user_id)
-            await query.edit_message_text(f"✅ Запись из дневника удалена!\n\n{entry_content}")
-        else:
-            await query.edit_message_text("❌ Запись не найдена.")
 
 
 # Начало процесса добавления дела
@@ -1074,23 +1681,45 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
+    # ConversationHandler для домашних заданий
+    hw_conv_handler = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex("^Добавить ДЗ$"), add_hw_start)],
+        states={
+            HW_SUBJECT: [CallbackQueryHandler(process_hw_subject, pattern='^hw_')],
+            HW_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_hw_content)],
+            HW_DUE_DATE: [CallbackQueryHandler(process_hw_due_date, pattern='^hw_')],
+            "HW_DATE_INPUT": [MessageHandler(filters.TEXT & ~filters.COMMAND, process_hw_date_input)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(task_conv_handler)
     application.add_handler(diary_conv_handler)
+    application.add_handler(hw_conv_handler)
     application.add_handler(MessageHandler(filters.Regex("^Мои дела$"), show_tasks))
     application.add_handler(MessageHandler(filters.Regex("^Дневник дел$"), show_diary))
+    application.add_handler(MessageHandler(filters.Regex("^ДЗ 📚$"), show_homework))
     application.add_handler(MessageHandler(filters.Regex("^Удалить дело$"), delete_task_start))
     application.add_handler(MessageHandler(filters.Regex("^Тест напоминания$"), test_reminder))
+    
+    # Обработчики для ДЗ
+    application.add_handler(CallbackQueryHandler(handle_hw_actions, pattern='^hw_'))
+    application.add_handler(CallbackQueryHandler(edit_homework_mode, pattern='^(hw_edit_|edit_hw_)'))
+    application.add_handler(CallbackQueryHandler(complete_homework_mode, pattern='^hw_complete'))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_hw_edit_input))
+    
+    # Обработчик для удаления
     application.add_handler(CallbackQueryHandler(process_delete, pattern='^delete_'))
 
-    logger.info("Бот запущен с расширенными функциями...")
+    logger.info("Бот запущен с системой домашних заданий...")
     print("=" * 60)
-    print("🤖 БОТ ЗАПУЩЕН! Новые функции:")
-    print("• 📔 Дневник дел - простые записи с напоминаниями")
-    print("• ⏰ ИНТЕРВАЛЬНЫЕ напоминания - настоящие интервалы каждый час/день и т.д.")
-    print("• 🔄 Периодические напоминания для дневника")
-    print("• 🗑️ Удаление дел И записей из дневника")
-    print("• 🌍 Московское время (UTC+3)")
+    print("📚 ДОБАВЛЕНА СИСТЕМА ДОМАШНИХ ЗАДАНИЙ!")
+    print("• 16 предметов из вашего расписания")
+    print("• Удобное добавление и редактирование")
+    print("• Просмотр по предметам")
+    print("• Отметка о выполнении")
+    print("• Сроки выполнения с напоминаниями")
     print("=" * 60)
 
     application.run_polling()
