@@ -4,7 +4,13 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
     ConversationHandler
 from datetime import datetime, timedelta
 import sqlite3
+import sys
+import os
 
+# Для отладки
+print(f"🐍 Python version: {sys.version}")
+print(f"📁 Current directory: {os.getcwd()}")
+print(f"📄 Files in directory: {os.listdir('.')}")
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -1727,3 +1733,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
