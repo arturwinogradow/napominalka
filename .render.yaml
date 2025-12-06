@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: telegram-homework-bot
+    env: python
+    branch: main
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: PORT
+        value: 10000
+    healthCheckPath: /
+    autoDeploy: true
+    plan: free
